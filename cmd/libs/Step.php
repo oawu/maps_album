@@ -30,6 +30,121 @@ class Step {
     $show = sprintf (' ' . self::color ('➜', 'W') . ' ' . self::color ($str . '(' . Step::$progress[$str]['i'] . '/' . Step::$progress[$str]['c'] . ')', 'g') . " - % 3d%% " . ($isStr ? '- ' . self::color ('完成！', 'C') : ''), Step::$progress[$str]['c'] ? ceil ((Step::$progress[$str]['i'] * 100) / Step::$progress[$str]['c']) : 100);
     echo sprintf ("\r% -" . (91 + count ($matches['c']) + ($isStr ? 12 : 0)) . "s" .  self::color (sprintf ('% 7s', $size[0]), 'W') . ' ' . $size[1] . " " . ($isStr ? "\n" : ''), $show, 10);
   }
+
+  public static function exifGpsLocation ($info) {
+    if (!(isset ($info['GPSLatitude']) && isset ($info['GPSLongitude']) && isset ($info['GPSLatitudeRef']) && isset ($info['GPSLongitudeRef']) && in_array ($info['GPSLatitudeRef'], array ('E','W','N','S')) && in_array ($info['GPSLongitudeRef'], array ('E','W','N','S')) && ($lat_d_a = explode ('/',$info['GPSLatitude'][0])) && ($lat_m_a = explode ('/',$info['GPSLatitude'][1])) && ($lat_s_a = explode ('/',$info['GPSLatitude'][2])) && ($lng_d_a = explode ('/',$info['GPSLongitude'][0])) && ($lng_m_a = explode ('/',$info['GPSLongitude'][1])) && ($lng_s_a = explode ('/',$info['GPSLongitude'][2])) && (count ($lat_d_a) >= 2) && (count ($lat_m_a) >= 2) && (count ($lat_s_a) >= 2) && (count ($lng_d_a) >= 2) && (count ($lng_m_a) >= 2) && (count ($lng_s_a) >= 2) && in_array ($lat_r = strtolower (trim ($info['GPSLatitudeRef'])), array ('n', 's')) && in_array ($lng_r = strtolower (trim ($info['GPSLongitudeRef'])), array ('w', 'e'))))
+      return array ();
+
+    $lat = (float) ($lat_d_a[0] / $lat_d_a[1]) + (((($lat_m_a[0] / $lat_m_a[1]) * 60) + ($lat_s_a[0] / $lat_s_a[1])) / 3600);
+    $lng = (float) ($lng_d_a[0] / $lng_d_a[1]) + (((($lng_m_a[0] / $lng_m_a[1]) * 60) + ($lng_s_a[0] / $lng_s_a[1])) / 3600);
+
+    return array (
+      'lat' => ($lat_r == 's' ? -1 : 1)* $lat,
+      'lng' => ($lng_r == 'w' ? -1 : 1) * $lng
+    );
+  }
+  public static function exifCreateTime ($info) {
+    if (isset ($info['DateTimeOriginal'])) return date ('Y-m-d H:i:s', strtotime ($info['DateTimeOriginal']));
+    if (isset ($info['DateTime'])) return date ('Y-m-d H:i:s', strtotime ($info['DateTime']));
+    if (isset ($info['DateTimeDigitized'])) return date ('Y-m-d H:i:s', strtotime ($info['DateTimeDigitized']));
+    return '';
+  }
+  public static function exifSize ($info) {
+    if (isset ($info['COMPUTED']['Height']) && isset ($info['COMPUTED']['Width'])) return array ('width' => $info['COMPUTED']['Width'], 'height' => $info['COMPUTED']['Height']);
+    if (isset ($info['ExifImageWidth']) && isset ($info['ExifImageLength'])) return array ('width' => $info['ExifImageWidth'], 'height' => $info['ExifImageLength']);
+    return array ();
+  }
+
+  public static function filterBuildJson ($names, $isCp = false) {
+    Step::newLine ('-', '取得資訊', count ($names));
+    
+    if ($errors = array_filter (array_map (function ($name) use ($isCp) {
+
+        if (!(file_exists ($ori_path = PATH_IMG_ALBUMS_ORI . $name . DIRECTORY_SEPARATOR) && is_dir ($ori_path) && is_readable ($ori_path)))
+          return ' 目錄：' . $ori_path;
+        if ((!(file_exists ($big_path = PATH_IMG_ALBUMS_BIG . $name . DIRECTORY_SEPARATOR) && is_dir ($big_path) && is_writable ($big_path)) && !Step::mkdir777 ($big_path)) || (!(file_exists ($mid_path = PATH_IMG_ALBUMS_MID . $name . DIRECTORY_SEPARATOR) && is_dir ($mid_path) && is_writable ($mid_path)) && !Step::mkdir777 ($mid_path)) || (!(file_exists ($small_path = PATH_IMG_ALBUMS_SMALL . $name . DIRECTORY_SEPARATOR) && is_dir ($small_path) && is_writable ($small_path)) && !Step::mkdir777 ($small_path)))
+          return ' 目錄：' . $ori_path;
+
+        $files = $cover = array ();
+        Step::mergeArrayRecursive (Step::directoryMap ($ori_path), $files, $ori_path);
+        
+        if (!$files = array_filter (array_map (function ($file) use (&$cover, $ori_path, $big_path, $mid_path, $small_path, $name, $isCp) {
+            if (!(($info = @exif_read_data ($file)) && ($create_at = Step::exifCreateTime ($info)) && ($location = Step::exifGpsLocation ($info)))) return array ();
+            // Orientation
+            $big = $big_path . str_replace ($ori_path, '', $file);
+            $mid = $mid_path . str_replace ($ori_path, '', $file);
+            $small = $small_path . str_replace ($ori_path, '', $file);
+
+            $img = ImageUtility::create ($file, 'ImageImagickUtility');
+            $img->cleanExif ()->rotate ($info['Orientation'] == 6 ? 90 : ($info['Orientation'] == 8 ? -90 : ($info['Orientation'] == 3 ? 180 : 0)));
+            
+            $img->save ($big);
+            $img->adaptiveResizeQuadrant (200, 200, 'c')->save ($mid);
+            $img->adaptiveResizeQuadrant (50, 50, 'c')->save ($small);
+
+            !$isCp && @unlink ($file);
+
+            $filename = pathinfo ($file, PATHINFO_FILENAME);
+            $data = array (
+                // 'path' => array (
+                //     // 'ori' => $file,
+                //     'big' => $big,
+                //     'mid' => $mid,
+                //     'small' => $small,
+                //   ),
+                'url' => array (
+                    // 'ori' => DIR_IMG_ALBUMS_ORI . $name . DIRECTORY_SEPARATOR . str_replace ($ori_path, '', $file),
+                    'big' => DIR_IMG_ALBUMS_BIG . $name . DIRECTORY_SEPARATOR . str_replace ($ori_path, '', $file),
+                    'mid' => DIR_IMG_ALBUMS_MID . $name . DIRECTORY_SEPARATOR . str_replace ($ori_path, '', $file),
+                    'small' => DIR_IMG_ALBUMS_SMALL . $name . DIRECTORY_SEPARATOR . str_replace ($ori_path, '', $file),
+                  ),
+                'name' => $filename,
+                'title' => $name,
+                'create_at' => $create_at,
+                'position' => $location,
+              );
+
+            if (!$cover || (strtolower ($filename) == 'cover'))
+              $cover = $data;
+
+            return $data;
+          }, $files)))
+          return ' 目錄：' . $ori_path;
+        
+        $create_at = max (array_map (function ($file) { return $file['create_at']; }, $files));
+        if (!Step::writeFile (PATH_API_ALBUMS . $name . JSON, json_encode (array ('title' => $name, 'create_at' => $create_at, 'cover' => $cover, 'pics' => array_values ($files)))))
+          return ' 目錄：' . $ori_path;
+  
+        Step::progress ('取得資訊');
+
+        return !$files ? ' 目錄：' . $dir : '';
+      }, $names))) Step::error ($errors);
+
+    Step::progress ('取得資訊', '完成！');
+  }
+  public static function buildAllJson () {
+    $files = $jsons = array ();
+    Step::mergeArrayRecursive (Step::directoryMap (PATH_API_ALBUMS), $files, PATH_API_ALBUMS);
+    Step::newLine ('-', '整理全部相簿資訊', count ($files));
+
+    if ($errors = array_filter (array_map (function ($file) use (&$jsons) {
+        Step::progress ('整理全部相簿資訊');
+        if (!$content = Step::readFile ($file))
+          return '檔案：' . $file;
+        if (!$content = json_decode (Step::readFile ($file), true))
+          return '檔案：' . $file;
+        array_push ($jsons, $content);
+        return '';
+      }, $files))) Step::error ($errors);
+
+    usort ($jsons, function ($a, $b) {
+      return $a['create_at'] < $b['create_at'];
+    });
+
+    if (!Step::writeFile (PATH_API . 'all' . JSON, json_encode (array_values ($jsons))))
+
+    Step::progress ('整理全部相簿資訊', '完成！');
+  }
   public static function start () {
     Step::$startTime = microtime (true);
     echo "\n" . str_repeat ('=', 80) . "\n";
@@ -74,10 +189,19 @@ class Step {
     if ($str) Step::progress ($str, $c);
   }
   public static function init () {
-    $paths = array (PATH);
+    $paths = array (PATH, PATH_API, PATH_API_ALBUMS, PATH_IMG_ALBUMS_ORI, PATH_IMG_ALBUMS_BIG, PATH_IMG_ALBUMS_SMALL);
+
     Step::newLine ('-', '初始化環境與變數', count ($paths));
+
+    if ($errors = array_filter (array_map (function ($path) {
+        if (!file_exists ($path)) Step::mkdir777 ($path);
+        Step::progress ('初始化環境與變數');
+        return !(is_dir ($path) && is_writable ($path)) ? ' 目錄：' . $path : '';
+      }, $paths))) Step::error ($errors);
+
     Step::progress ('初始化環境與變數', '完成！');
   }
+
   public static function initS3 ($access, $secret) {
     Step::newLine ('-', '初始化 S3 工具');
     
@@ -146,9 +270,7 @@ class Step {
         try {
           Step::progress ('上傳檔案');
           return !S3::putFile ($file['path'], BUCKET, NAME . DIRECTORY_SEPARATOR . $file['uri']) ? ' 檔案：' . $file['path'] : '';
-        } catch (Exception $e) {
-          return ' 檔案：' . $file['path'];
-        }
+        } catch (Exception $e) { Step::error (array (' ' . $e->getMessage ())); }
       }, $files))) Step::error ($errors);
     Step::progress ('上傳檔案', '完成！');
   }
@@ -172,9 +294,7 @@ class Step {
         try {
           Step::progress ('刪除 S3 上需要刪除的檔案');
           return !S3::deleteObject (BUCKET, $file['name']) ? ' 檔案：' . $file['name'] : '';
-        } catch (Exception $e) {
-          return ' 檔案：' . $file['name'];
-        }
+        } catch (Exception $e) { Step::error (array (' ' . $e->getMessage ())); }
       }, $files))) Step::error ($errors);
     Step::progress ('刪除 S3 上需要刪除的檔案', '完成！');
   }
@@ -282,6 +402,12 @@ class Step {
     flock($fp, LOCK_UN);
     fclose($fp);
 
+    return true;
+  }
+  public static function mkdir777 ($path) {
+    $oldmask = umask (0);
+    @mkdir ($path, 0777, true);
+    umask ($oldmask);
     return true;
   }
 }
